@@ -40,9 +40,29 @@ final class ProductDetailsViewController: UIViewController {
         super.viewDidLoad()
         title = "Product Details"
         view.backgroundColor = .systemBackground
+
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            image: nil,
+            style: .plain,
+            target: self,
+            action: #selector(favoriteTapped)
+        )
+        refreshFavoriteButton()
+
         setupLayout()
         renderContent()
         loadVariationsIfNeeded()
+    }
+
+    private func refreshFavoriteButton() {
+        let isFavorite = FavoritesStore.shared.isFavoriteProduct(baseProduct.id)
+        navigationItem.rightBarButtonItem?.image = UIImage(systemName: isFavorite ? "heart.fill" : "heart")
+        navigationItem.rightBarButtonItem?.tintColor = isFavorite ? .systemRed : .label
+    }
+
+    @objc private func favoriteTapped() {
+        FavoritesStore.shared.toggleProduct(baseProduct.id)
+        refreshFavoriteButton()
     }
 
     private func loadVariationsIfNeeded() {

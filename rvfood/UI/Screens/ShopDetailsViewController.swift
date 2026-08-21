@@ -29,6 +29,14 @@ final class ShopDetailsViewController: UIViewController {
         title = shop.name
         view.backgroundColor = .systemGroupedBackground
 
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            image: nil,
+            style: .plain,
+            target: self,
+            action: #selector(favoriteTapped)
+        )
+        refreshFavoriteButton()
+
         tableView.dataSource = self
         tableView.delegate = self
         tableView.register(ProductRowCell.self, forCellReuseIdentifier: ProductRowCell.reuseID)
@@ -58,6 +66,17 @@ final class ShopDetailsViewController: UIViewController {
         if !products.isEmpty {
             tableView.reloadData()
         }
+    }
+
+    private func refreshFavoriteButton() {
+        let isFavorite = FavoritesStore.shared.isFavoriteShop(shop.id)
+        navigationItem.rightBarButtonItem?.image = UIImage(systemName: isFavorite ? "heart.fill" : "heart")
+        navigationItem.rightBarButtonItem?.tintColor = isFavorite ? .systemRed : .label
+    }
+
+    @objc private func favoriteTapped() {
+        FavoritesStore.shared.toggleShop(shop.id)
+        refreshFavoriteButton()
     }
 
     private var groupedSections: [(categoryName: String, items: [Product])] {

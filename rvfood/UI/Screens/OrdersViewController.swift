@@ -18,7 +18,7 @@ final class OrdersViewController: UIViewController {
     private let overlay = StateOverlayView()
     private var observer: NSObjectProtocol?
 
-    init(repository: OrderRepositoryProtocol = DemoOrderRepository()) {
+    init(repository: OrderRepositoryProtocol = LocalOrderRepository()) {
         self.repository = repository
         super.init(nibName: nil, bundle: nil)
     }

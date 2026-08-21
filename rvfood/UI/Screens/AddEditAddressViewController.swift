@@ -21,7 +21,7 @@ final class AddEditAddressViewController: UIViewController {
 
     init(
         address: Address?,
-        repository: AddressRepositoryProtocol = DemoAddressRepository(),
+        repository: AddressRepositoryProtocol = LocalAddressRepository(),
         onSaved: @escaping () -> Void
     ) {
         self.existingAddress = address

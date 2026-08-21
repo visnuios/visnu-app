@@ -14,7 +14,7 @@ final class AddressSelectionViewController: UIViewController {
     private let overlay = StateOverlayView()
     private let continueButton = PrimaryButton(title: "Continue")
 
-    init(draft: CheckoutDraft, repository: AddressRepositoryProtocol = DemoAddressRepository()) {
+    init(draft: CheckoutDraft, repository: AddressRepositoryProtocol = LocalAddressRepository()) {
         self.draft = draft
         self.repository = repository
         super.init(nibName: nil, bundle: nil)

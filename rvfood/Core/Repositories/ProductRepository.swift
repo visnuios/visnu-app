@@ -24,7 +24,7 @@ protocol ProductRepositoryProtocol {
 final class DemoProductRepository: ProductRepositoryProtocol {
 
     private var catalog: [Product] { DemoCatalog.products }
-    private var specialIds: Set<String> { ["ghee", "honey", "dry_fruits"] }
+    private var specialIds: Set<String> { ["ghee", "honey", "dry_fruits", "mysore_pak", "halwa", "mutton_biriyani", "fish_seer", "org_avocado"] }
 
     func products(shopId: String) async throws -> [Product] {
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -36,7 +36,7 @@ final class DemoProductRepository: ProductRepositoryProtocol {
         guard let product = catalog.first(where: { $0.id == productId }) else {
             throw APIError.notFound
         }
-        let variations = productId == "pizza_margherita" ? DemoCatalog.pizzaVariations : []
+        let variations = DemoCatalog.variations(forProductId: productId)
         return ProductDetails(
             product: product,
             variations: variations,

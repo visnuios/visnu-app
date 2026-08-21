@@ -137,15 +137,21 @@ final class HomeViewController: UIViewController {
         bellButton.subviews.compactMap { $0 as? UILabel }.forEach { $0.removeFromSuperview() }
         guard count > 0 else { return }
         let badge = UILabel()
-        badge.text = "\(count)"
+        badge.text = count > 9 ? "9+" : "\(count)"
         badge.font = .systemFont(ofSize: 10, weight: .bold)
         badge.textColor = .white
         badge.backgroundColor = .systemRed
         badge.textAlignment = .center
         badge.layer.cornerRadius = 8
         badge.clipsToBounds = true
-        badge.frame = CGRect(x: bellButton.frame.width - 6, y: -2, width: 16, height: 16)
+        badge.translatesAutoresizingMaskIntoConstraints = false
         bellButton.addSubview(badge)
+        NSLayoutConstraint.activate([
+            badge.topAnchor.constraint(equalTo: bellButton.topAnchor, constant: -4),
+            badge.trailingAnchor.constraint(equalTo: bellButton.trailingAnchor, constant: 6),
+            badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 16),
+            badge.heightAnchor.constraint(equalToConstant: 16)
+        ])
     }
 
     override func viewWillAppear(_ animated: Bool) {

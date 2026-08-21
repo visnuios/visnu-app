@@ -50,7 +50,7 @@ final class OrderTrackingViewController: UIViewController {
         ) { [weak self] _ in
             guard let self else { return }
             Task {
-                if let fresh = try? await DemoOrderRepository().order(id: self.order.id) {
+                if let fresh = try? await LocalOrderRepository().order(id: self.order.id) {
                     self.order = fresh
                     self.tableView.reloadData()
                 }

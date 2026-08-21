@@ -1,49 +1,47 @@
+import CoreData
 import Foundation
 
 extension Notification.Name {
     static let ordersDidChange = Notification.Name("rvfood.ordersDidChange")
     static let unreadNotificationsDidChange = Notification.Name("rvfood.unreadNotificationsDidChange")
+    static let favoritesDidChange = Notification.Name("rvfood.favoritesDidChange")
 }
 
 final class NotificationsStore {
 
     static let shared = NotificationsStore()
 
-    private(set) var notifications: [AppNotification] = []
+    private let persistence: PersistenceController
 
-    private let defaults: UserDefaults
-    private static let storageKey = "rvfood.notifications"
-
-    var unreadCount: Int {
-        notifications.filter { !$0.isRead }.count
+    init(controller: PersistenceController = .shared) {
+        self.persistence = controller
+        seedWelcomeIfNeeded()
     }
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        if let data = defaults.data(forKey: Self.storageKey),
-           let saved = try? JSONDecoder().decode([AppNotification].self, from: data) {
-            notifications = saved
-        } else {
-            notifications = [
-                AppNotification(
-                    id: "seed_offer",
-                    kind: .offer,
-                    title: "Welcome offer!",
-                    message: "Use coupon SAVE10 for 10% off (up to ₹40) on orders above ₹300.",
-                    createdAt: Date.now.addingTimeInterval(-3600),
-                    isRead: false
-                )
-            ]
-            persist()
-        }
+    private var context: NSManagedObjectContext { persistence.context }
+
+    var notifications: [AppNotification] {
+        let request = NSFetchRequest<ManagedNotification>(entityName: "Notification")
+        let sort = NSSortDescriptor(key: "createdAt", ascending: false)
+        request.sortDescriptors = [sort]
+        return ((try? context.fetch(request)) ?? []).map(\.asStruct)
+    }
+
+    var unreadCount: Int {
+        let request = NSFetchRequest<ManagedNotification>(entityName: "Notification")
+        request.predicate = NSPredicate(format: "isRead == NO")
+        return (try? context.count(for: request)) ?? 0
     }
 
     func add(kind: AppNotification.Kind, title: String, message: String) {
-        notifications.insert(
-            AppNotification(id: UUID().uuidString, kind: kind, title: title, message: message, createdAt: Date.now, isRead: false),
-            at: 0
-        )
-        persist()
+        let managed = ManagedNotification(entity: PersistenceController.model.entitiesByName["Notification"]!, insertInto: context)
+        managed.id = UUID().uuidString
+        managed.kindRaw = kind.rawValue
+        managed.title = title
+        managed.message = message
+        managed.createdAt = Date.now
+        managed.isRead = false
+        persistence.save()
         NotificationCenter.default.post(name: .unreadNotificationsDidChange, object: nil)
     }
 
@@ -57,55 +55,61 @@ final class NotificationsStore {
 
     func markAllRead() {
         guard unreadCount > 0 else { return }
-        notifications = notifications.map { item in
-            var item = item
-            item.isRead = true
-            return item
+        let request = NSFetchRequest<ManagedNotification>(entityName: "Notification")
+        for managed in (try? context.fetch(request)) ?? [] {
+            managed.isRead = true
         }
-        persist()
+        persistence.save()
         NotificationCenter.default.post(name: .unreadNotificationsDidChange, object: nil)
     }
 
-    private func persist() {
-        if let data = try? JSONEncoder().encode(notifications) {
-            defaults.set(data, forKey: Self.storageKey)
+    func clearAll() {
+        let request = NSFetchRequest<ManagedNotification>(entityName: "Notification")
+        for managed in (try? context.fetch(request)) ?? [] {
+            context.delete(managed)
         }
+        persistence.save()
+        NotificationCenter.default.post(name: .unreadNotificationsDidChange, object: nil)
+    }
+
+    private func seedWelcomeIfNeeded() {
+        guard notifications.isEmpty else { return }
+        let managed = ManagedNotification(entity: PersistenceController.model.entitiesByName["Notification"]!, insertInto: context)
+        managed.id = "seed_offer"
+        managed.kindRaw = AppNotification.Kind.offer.rawValue
+        managed.title = "Welcome offer!"
+        managed.message = "Use coupon WELCOME20 for ₹20 off your first order above ₹99. Also try SAVE10 and FLAT50."
+        managed.createdAt = Date.now.addingTimeInterval(-3600)
+        managed.isRead = false
+        persistence.save()
     }
 }
 
 final class FavoritesStore {
 
-    static let shared = FavoritesStore()
-
-    private(set) var favoriteShopIds: Set<String> = []
-    private(set) var favoriteProductIds: Set<String> = []
-
-    private let defaults: UserDefaults
-    private static let shopsKey = "rvfood.favoriteShops"
-    private static let productsKey = "rvfood.favoriteProducts"
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        favoriteShopIds = Set(defaults.stringArray(forKey: Self.shopsKey) ?? [])
-        favoriteProductIds = Set(defaults.stringArray(forKey: Self.productsKey) ?? [])
+    enum Kind: String {
+        case shop, product
     }
 
+    static let shared = FavoritesStore()
+
+    private let persistence: PersistenceController
+
+    init(controller: PersistenceController = .shared) {
+        self.persistence = controller
+    }
+
+    private var context: NSManagedObjectContext { persistence.context }
+
+    var favoriteShopIds: Set<String> { ids(for: .shop) }
+    var favoriteProductIds: Set<String> { ids(for: .product) }
+
     func toggleShop(_ shopId: String) {
-        if favoriteShopIds.contains(shopId) {
-            favoriteShopIds.remove(shopId)
-        } else {
-            favoriteShopIds.insert(shopId)
-        }
-        defaults.set(Array(favoriteShopIds), forKey: Self.shopsKey)
+        toggle(shopId, kind: .shop)
     }
 
     func toggleProduct(_ productId: String) {
-        if favoriteProductIds.contains(productId) {
-            favoriteProductIds.remove(productId)
-        } else {
-            favoriteProductIds.insert(productId)
-        }
-        defaults.set(Array(favoriteProductIds), forKey: Self.productsKey)
+        toggle(productId, kind: .product)
     }
 
     func isFavoriteShop(_ shopId: String) -> Bool {
@@ -114,5 +118,25 @@ final class FavoritesStore {
 
     func isFavoriteProduct(_ productId: String) -> Bool {
         favoriteProductIds.contains(productId)
+    }
+
+    private func ids(for kind: Kind) -> Set<String> {
+        let request = NSFetchRequest<ManagedFavorite>(entityName: "Favorite")
+        request.predicate = NSPredicate(format: "kind == %@", kind.rawValue)
+        return Set(((try? context.fetch(request)) ?? []).map(\.id))
+    }
+
+    private func toggle(_ id: String, kind: Kind) {
+        let request = NSFetchRequest<ManagedFavorite>(entityName: "Favorite")
+        request.predicate = NSPredicate(format: "id == %@ AND kind == %@", id, kind.rawValue)
+        if let existing = try? context.fetch(request).first {
+            context.delete(existing)
+        } else {
+            let managed = ManagedFavorite(entity: PersistenceController.model.entitiesByName["Favorite"]!, insertInto: context)
+            managed.id = id
+            managed.kind = kind.rawValue
+        }
+        persistence.save()
+        NotificationCenter.default.post(name: .favoritesDidChange, object: nil)
     }
 }

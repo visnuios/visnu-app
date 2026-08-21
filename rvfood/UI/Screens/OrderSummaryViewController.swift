@@ -18,7 +18,7 @@ final class OrderSummaryViewController: UIViewController {
     init(
         draft: CheckoutDraft,
         cart: CartManager = .shared,
-        orderRepository: OrderRepositoryProtocol = DemoOrderRepository(),
+        orderRepository: OrderRepositoryProtocol = LocalOrderRepository(),
         productRepository: ProductRepositoryProtocol = DemoProductRepository()
     ) {
         self.draft = draft

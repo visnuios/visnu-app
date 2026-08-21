@@ -3,13 +3,23 @@ import UIKit
 final class NotificationsViewController: UIViewController {
 
     private let tableView = UITableView(frame: .zero, style: .insetGrouped)
+    private var observer: NSObjectProtocol?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Notifications"
         view.backgroundColor = .systemGroupedBackground
+
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            title: "Clear All",
+            style: .plain,
+            target: self,
+            action: #selector(clearAllTapped)
+        )
+
         tableView.dataSource = self
         tableView.register(SubtitleCell.self, forCellReuseIdentifier: SubtitleCell.reuseID)
+        tableView.rowHeight = UITableView.automaticDimension
         tableView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(tableView)
         NSLayoutConstraint.activate([
@@ -18,6 +28,30 @@ final class NotificationsViewController: UIViewController {
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+
+        observer = NotificationCenter.default.addObserver(
+            forName: .unreadNotificationsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.tableView.reloadData()
+        }
+    }
+
+    deinit {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    @objc private func clearAllTapped() {
+        guard !NotificationsStore.shared.notifications.isEmpty else { return }
+        let alert = UIAlertController(title: "Clear notifications?", message: "All notifications will be removed.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Clear", style: .destructive) { _ in
+            NotificationsStore.shared.clearAll()
+        })
+        present(alert, animated: true)
     }
 }
 
@@ -36,12 +70,19 @@ extension NotificationsViewController: UITableViewDataSource {
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let notification = NotificationsStore.shared.notifications[indexPath.row]
         let cell = tableView.dequeueReusableCell(withIdentifier: SubtitleCell.reuseID, for: indexPath)
-        let icon = notification.kind == .order ? "🧾" : "🎉"
+        let icon = notification.kind == .order ? "🧾" : (notification.kind == .offer ? "🎉" : "🔔")
         cell.textLabel?.text = "\(icon) \(notification.title)"
-        cell.textLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
-        cell.detailTextLabel?.text = notification.message
-        cell.detailTextLabel?.numberOfLines = 2
+        cell.textLabel?.font = .systemFont(ofSize: 15, weight: notification.isRead ? .regular : .semibold)
+        cell.detailTextLabel?.text = "\(notification.message)\n\(Self.timeAgo(from: notification.createdAt))"
+        cell.detailTextLabel?.numberOfLines = 0
+        cell.detailTextLabel?.textColor = .secondaryLabel
         return cell
+    }
+
+    static func timeAgo(from date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date.now)
     }
 
     private func makeEmptyLabel(_ text: String) -> UILabel {
@@ -61,7 +102,7 @@ final class MyAddressesViewController: UIViewController {
     private let repository: AddressRepositoryProtocol
     private let tableView = UITableView(frame: .zero, style: .insetGrouped)
 
-    init(repository: AddressRepositoryProtocol = DemoAddressRepository()) {
+    init(repository: AddressRepositoryProtocol = LocalAddressRepository()) {
         self.repository = repository
         super.init(nibName: nil, bundle: nil)
     }
@@ -173,6 +214,7 @@ final class FavoritesViewController: UIViewController {
     private var favoriteShops: [Shop] = []
     private var favoriteProducts: [(product: Product, shopName: String)] = []
     private let tableView = UITableView(frame: .zero, style: .insetGrouped)
+    private var observer: NSObjectProtocol?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -190,10 +232,28 @@ final class FavoritesViewController: UIViewController {
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+
+        observer = NotificationCenter.default.addObserver(
+            forName: .favoritesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reloadFavorites()
+        }
+    }
+
+    deinit {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        reloadFavorites()
+    }
+
+    private func reloadFavorites() {
         let favorites = FavoritesStore.shared
         favoriteShops = DemoCatalog.shops.filter { favorites.isFavoriteShop($0.id) }
         favoriteProducts = DemoCatalog.products
@@ -255,6 +315,7 @@ final class CouponsViewController: UIViewController {
         title = "Coupons"
         view.backgroundColor = .systemGroupedBackground
         tableView.dataSource = self
+        tableView.delegate = self
         tableView.rowHeight = UITableView.automaticDimension
         tableView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(tableView)
@@ -267,7 +328,7 @@ final class CouponsViewController: UIViewController {
     }
 }
 
-extension CouponsViewController: UITableViewDataSource {
+extension CouponsViewController: UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         coupons.isEmpty ? 0 : coupons.count
@@ -279,9 +340,18 @@ extension CouponsViewController: UITableViewDataSource {
         cell.textLabel?.text = "🎟️ \(coupon.code)"
         cell.textLabel?.font = .boldSystemFont(ofSize: 16)
         cell.textLabel?.textColor = .systemOrange
-        cell.detailTextLabel?.text = coupon.title
+        cell.detailTextLabel?.text = "\(coupon.title)\nTap to copy the code"
         cell.detailTextLabel?.numberOfLines = 0
         return cell
+    }
+
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        let coupon = coupons[indexPath.row]
+        UIPasteboard.general.string = coupon.code
+        let alert = UIAlertController(title: "Code copied", message: "\(coupon.code) is ready to paste at checkout.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 }
 

@@ -9,7 +9,7 @@ final class OrderDetailsViewController: UIViewController {
     private let tableView = UITableView(frame: .zero, style: .insetGrouped)
     private let actionButton = PrimaryButton(title: "")
 
-    init(order: Order, repository: OrderRepositoryProtocol = DemoOrderRepository()) {
+    init(order: Order, repository: OrderRepositoryProtocol = LocalOrderRepository()) {
         self.order = order
         self.repository = repository
         super.init(nibName: nil, bundle: nil)
@@ -33,7 +33,7 @@ final class OrderDetailsViewController: UIViewController {
 
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.allowsSelection = false
+        tableView.rowHeight = UITableView.automaticDimension
         tableView.translatesAutoresizingMaskIntoConstraints = false
         actionButton.translatesAutoresizingMaskIntoConstraints = false
 
@@ -79,7 +79,11 @@ final class OrderDetailsViewController: UIViewController {
             actionButton.backgroundColor = .systemRed
             actionButton.isHidden = false
         case .delivered:
-            actionButton.setTitle("Reorder", for: .normal)
+            if repository.hasReview(orderId: order.id) {
+                actionButton.setTitle("Reorder", for: .normal)
+            } else {
+                actionButton.setTitle("Rate & Review", for: .normal)
+            }
             actionButton.backgroundColor = .systemOrange
             actionButton.isHidden = false
         default:
@@ -92,10 +96,27 @@ final class OrderDetailsViewController: UIViewController {
         case .pending, .accepted:
             confirmCancel()
         case .delivered:
-            reorder()
+            if repository.hasReview(orderId: order.id) {
+                reorder()
+            } else {
+                promptReview()
+            }
         default:
             break
         }
+    }
+
+    private func promptReview() {
+        let reviewVC = ReviewViewController(shopName: order.shopName) { [weak self] stars, text in
+            guard let self else { return }
+            Task {
+                try? await self.repository.submitReview(orderId: self.order.id, stars: stars, text: text)
+                NotificationsStore.shared.add(kind: .system, title: "Thanks for your review!", message: "You rated order #\(self.order.id) \(stars) star(s).")
+                self.refreshActionButton()
+            }
+        }
+        reviewVC.modalPresentationStyle = .overFullScreen
+        present(reviewVC, animated: false)
     }
 
     private func confirmCancel() {
@@ -181,6 +202,10 @@ extension OrderDetailsViewController: UITableViewDataSource, UITableViewDelegate
             formatter.dateStyle = .medium
             formatter.timeStyle = .short
             cell.detailTextLabel?.text = "Placed on \(formatter.string(from: order.createdAt)) · \(order.paymentMethod.displayTitle)\(order.isPaid ? " (Paid)" : "")"
+            if order.status.isActive || order.status == .delivered {
+                cell.accessoryType = .disclosureIndicator
+                cell.detailTextLabel?.text? += "\nTap to track this order →"
+            }
         case 1:
             cell.textLabel?.text = order.addressSnapshot
             cell.textLabel?.numberOfLines = 0
@@ -210,3 +235,109 @@ extension OrderDetailsViewController: UITableViewDataSource, UITableViewDelegate
         navigationController?.pushViewController(OrderTrackingViewController(order: order), animated: true)
     }
 }
+
+final class ReviewViewController: UIViewController {
+
+    private let shopName: String
+    private let onSubmit: (Int, String?) -> Void
+    private var selectedStars = 5
+
+    private let cardView = UIView()
+    private let titleLabel = UILabel()
+    private let starsStack = UIStackView()
+    private let commentField = UITextField()
+    private let submitButton = PrimaryButton(title: "Submit Review")
+    private var starButtons: [UIButton] = []
+
+    init(shopName: String, onSubmit: @escaping (Int, String?) -> Void) {
+        self.shopName = shopName
+        self.onSubmit = onSubmit
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+
+        cardView.backgroundColor = .secondarySystemGroupedBackground
+        cardView.layer.cornerRadius = 16
+        cardView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(cardView)
+
+        titleLabel.text = "Rate \(shopName)"
+        titleLabel.font = .boldSystemFont(ofSize: 18)
+        titleLabel.textAlignment = .center
+
+        starsStack.axis = .horizontal
+        starsStack.alignment = .center
+        starsStack.distribution = .equalSpacing
+
+        for star in 1...5 {
+            let button = UIButton(type: .system)
+            button.setTitle("★", for: .normal)
+            button.titleLabel?.font = .systemFont(ofSize: 36)
+            button.tag = star
+            button.addAction(UIAction { [weak self] _ in
+                self?.select(stars: button.tag)
+            }, for: .touchUpInside)
+            starButtons.append(button)
+            starsStack.addArrangedSubview(button)
+        }
+
+        commentField.placeholder = "Tell us more (optional)"
+        commentField.borderStyle = .roundedRect
+        commentField.heightAnchor.constraint(equalToConstant: 44).isActive = true
+
+        submitButton.addTarget(self, action: #selector(submitTapped), for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [titleLabel, starsStack, commentField, submitButton])
+        stack.axis = .vertical
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        cardView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            cardView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            cardView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
+            cardView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
+
+            stack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 24),
+            stack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
+            stack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -24)
+        ])
+
+        select(stars: 5)
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(dismissTapped))
+        tap.cancelsTouchesInView = false
+        view.addGestureRecognizer(tap)
+    }
+
+    private func select(stars: Int) {
+        selectedStars = max(stars, 1)
+        for button in starButtons {
+            button.tintColor = button.tag <= selectedStars ? .systemOrange : .systemGray4
+        }
+    }
+
+    @objc private func submitTapped() {
+        dismiss(animated: false) { [weak self] in
+            guard let self else { return }
+            let text = commentField.text?.trimmingCharacters(in: .whitespaces)
+            onSubmit(selectedStars, (text?.isEmpty == true) ? nil : text)
+        }
+    }
+
+    @objc private func dismissTapped(_ sender: UITapGestureRecognizer) {
+        let point = sender.location(in: view)
+        if !cardView.frame.contains(point) {
+            dismiss(animated: false)
+        }
+    }
+}
+

@@ -1,3 +1,4 @@
+import CoreData
 import Foundation
 
 protocol OrderRepositoryProtocol {
@@ -7,18 +8,19 @@ protocol OrderRepositoryProtocol {
     func cancelOrder(id: String) async throws -> Order
     func reorder(orderId: String) async throws -> (addedCount: Int, unavailableItems: [String])
     func submitReview(orderId: String, stars: Int, text: String?) async throws
+    func hasReview(orderId: String) -> Bool
 }
 
-final class DemoOrderRepository: OrderRepositoryProtocol {
+final class LocalOrderRepository: OrderRepositoryProtocol {
 
-    private let defaults: UserDefaults
-    private static let storageKey = "rvfood.orders"
-    private var statusTimer: Timer?
+    private let persistence: PersistenceController
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        startStatusProgression()
+    init(controller: PersistenceController = .shared) {
+        self.persistence = controller
+        OrderStatusEngine.shared.start()
     }
+
+    private var context: NSManagedObjectContext { persistence.context }
 
     func placeOrder(_ request: PlaceOrderRequest) async throws -> PlaceOrderResult {
         try await Task.sleep(nanoseconds: 900_000_000)
@@ -52,7 +54,7 @@ final class DemoOrderRepository: OrderRepositoryProtocol {
             throw APIError.businessRule("Your cart is empty.")
         }
 
-        let address = try await DemoAddressRepository().address(id: request.addressId)
+        let address = try await LocalAddressRepository().address(id: request.addressId)
 
         let cartSubtotal = orderItems.reduce(Decimal(0)) { $0 + $1.lineTotal }.roundedTo()
 
@@ -84,7 +86,7 @@ final class DemoOrderRepository: OrderRepositoryProtocol {
         let taxAmount = (taxableAmount * TaxDefaults.rate).roundedTo()
         let grandTotal = max(taxableAmount + deliveryFee + taxAmount, 0)
 
-        let isPaid = !request.paymentMethod.requiresOnlinePayment ? false : true
+        let isPaid = request.paymentMethod.requiresOnlinePayment
 
         let order = Order(
             id: "ORD\(Int.random(in: 10000...99999))",
@@ -106,19 +108,18 @@ final class DemoOrderRepository: OrderRepositoryProtocol {
             couponCode: request.couponCode
         )
 
-        var all = load()
-        all.insert(order, at: 0)
-        persist(all)
+        ManagedOrder.from(order, in: context)
+        persistence.save()
         return PlaceOrderResult(order: order)
     }
 
     func orders() async throws -> [Order] {
         try await Task.sleep(nanoseconds: 200_000_000)
-        return load()
+        return fetchOrders()
     }
 
     func order(id: String) async throws -> Order {
-        guard let order = load().first(where: { $0.id == id }) else {
+        guard let order = fetchOrders().first(where: { $0.id == id }) else {
             throw APIError.notFound
         }
         return order
@@ -126,16 +127,16 @@ final class DemoOrderRepository: OrderRepositoryProtocol {
 
     func cancelOrder(id: String) async throws -> Order {
         try await Task.sleep(nanoseconds: 400_000_000)
-        var all = load()
-        guard let index = all.firstIndex(where: { $0.id == id }) else {
+        let all = fetchOrders()
+        guard let existing = all.first(where: { $0.id == id }) else {
             throw APIError.notFound
         }
-        guard all[index].status.canBeCancelled else {
+        guard existing.status.canBeCancelled else {
             throw APIError.businessRule("This order can no longer be cancelled.")
         }
-        let cancelled = rebuild(all[index], status: .cancelled)
-        all[index] = cancelled
-        persist(all)
+        let cancelled = rebuild(existing, status: .cancelled)
+        update(cancelled)
+        persistence.save()
         return cancelled
     }
 
@@ -169,14 +170,36 @@ final class DemoOrderRepository: OrderRepositoryProtocol {
 
     func submitReview(orderId: String, stars: Int, text: String?) async throws {
         try await Task.sleep(nanoseconds: 300_000_000)
-        _ = Review(
-            id: UUID().uuidString,
-            orderId: orderId,
-            subject: .shop,
-            stars: min(max(stars, 1), 5),
-            text: text,
-            createdAt: Date.now
-        )
+        let review = ManagedReview(entity: PersistenceController.model.entitiesByName["Review"]!, insertInto: context)
+        review.id = UUID().uuidString
+        review.orderId = orderId
+        review.stars = Int16(min(max(stars, 1), 5))
+        review.text = text
+        review.createdAt = Date.now
+        persistence.save()
+    }
+
+    func hasReview(orderId: String) -> Bool {
+        let request = NSFetchRequest<ManagedReview>(entityName: "Review")
+        request.predicate = NSPredicate(format: "orderId == %@", orderId)
+        request.fetchLimit = 1
+        return ((try? context.count(for: request)) ?? 0) > 0
+    }
+
+    private func fetchOrders() -> [Order] {
+        let request = NSFetchRequest<ManagedOrder>(entityName: "Order")
+        let sort = NSSortDescriptor(key: "createdAt", ascending: false)
+        request.sortDescriptors = [sort]
+        return ((try? context.fetch(request)) ?? []).map(\.asStruct)
+    }
+
+    private func update(_ order: Order) {
+        let request = NSFetchRequest<ManagedOrder>(entityName: "Order")
+        request.predicate = NSPredicate(format: "id == %@", order.id)
+        request.fetchLimit = 1
+        if let managed = try? context.fetch(request).first {
+            ManagedOrder.apply(order, to: managed)
+        }
     }
 
     private func rebuild(_ order: Order, status: OrderStatus) -> Order {
@@ -194,26 +217,39 @@ final class DemoOrderRepository: OrderRepositoryProtocol {
             couponCode: order.couponCode
         )
     }
+}
 
-    private func startStatusProgression() {
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 25.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.advanceActiveOrders()
-            }
+final class OrderStatusEngine {
+
+    static let shared = OrderStatusEngine()
+
+    private var timer: Timer?
+
+    private init() {}
+
+    func start() {
+        guard timer == nil else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 25.0, repeats: true) { [weak self] _ in
+            self?.advanceActiveOrders()
         }
     }
 
     private func advanceActiveOrders() {
-        var all = load()
+        let context = PersistenceController.shared.context
+        let request = NSFetchRequest<ManagedOrder>(entityName: "Order")
+        let all = (try? context.fetch(request)) ?? []
         var changed = false
-        for index in all.indices {
-            guard let next = nextStatus(after: all[index].status) else { continue }
-            all[index] = rebuild(all[index], status: next)
+
+        for managed in all {
+            guard let status = OrderStatus(rawValue: managed.statusRaw),
+                  let next = nextStatus(after: status) else { continue }
+            managed.statusRaw = next.rawValue
             changed = true
-            NotificationsStore.shared.addOrderUpdate(orderId: all[index].id, status: next)
+            NotificationsStore.shared.addOrderUpdate(orderId: managed.id, status: next)
         }
+
         if changed {
-            persist(all)
+            PersistenceController.shared.save()
             NotificationCenter.default.post(name: .ordersDidChange, object: nil)
         }
     }
@@ -227,64 +263,5 @@ final class DemoOrderRepository: OrderRepositoryProtocol {
         case .outForDelivery: return .delivered
         default: return nil
         }
-    }
-
-    private func load() -> [Order] {
-        guard let data = defaults.data(forKey: Self.storageKey) else { return [] }
-        return (try? JSONDecoder().decode([StoredOrder].self, from: data)).map { stored in
-            stored.map(\.order)
-        } ?? []
-    }
-
-    private func persist(_ orders: [Order]) {
-        let stored = orders.map(StoredOrder.init)
-        if let data = try? JSONEncoder().encode(stored) {
-            defaults.set(data, forKey: Self.storageKey)
-        }
-    }
-}
-
-private struct StoredOrder: Codable {
-    let order: Order
-
-    init(order: Order) {
-        self.order = order
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case id, shopId, shopName, createdAt, items, addressSnapshot
-        case paymentMethod, isPaid, status, totals, couponCode
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        order = Order(
-            id: (try? container.decode(String.self, forKey: .id)) ?? "",
-            shopId: (try? container.decode(String.self, forKey: .shopId)) ?? "",
-            shopName: (try? container.decode(String.self, forKey: .shopName)) ?? "",
-            createdAt: (try? container.decode(Date.self, forKey: .createdAt)) ?? Date(timeIntervalSince1970: 0),
-            items: (try? container.decode([OrderItem].self, forKey: .items)) ?? [],
-            addressSnapshot: (try? container.decode(String.self, forKey: .addressSnapshot)) ?? "",
-            paymentMethod: (try? container.decode(PaymentMethod.self, forKey: .paymentMethod)) ?? .cashOnDelivery,
-            isPaid: (try? container.decode(Bool.self, forKey: .isPaid)) ?? false,
-            status: (try? container.decode(OrderStatus.self, forKey: .status)) ?? .pending,
-            totals: (try? container.decode(OrderTotals.self, forKey: .totals)) ?? .empty,
-            couponCode: try? container.decodeIfPresent(String.self, forKey: .couponCode)
-        )
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(order.id, forKey: .id)
-        try container.encode(order.shopId, forKey: .shopId)
-        try container.encode(order.shopName, forKey: .shopName)
-        try container.encode(order.createdAt, forKey: .createdAt)
-        try container.encode(order.items, forKey: .items)
-        try container.encode(order.addressSnapshot, forKey: .addressSnapshot)
-        try container.encode(order.paymentMethod, forKey: .paymentMethod)
-        try container.encode(order.isPaid, forKey: .isPaid)
-        try container.encode(order.status, forKey: .status)
-        try container.encode(order.totals, forKey: .totals)
-        try container.encodeIfPresent(order.couponCode, forKey: .couponCode)
     }
 }

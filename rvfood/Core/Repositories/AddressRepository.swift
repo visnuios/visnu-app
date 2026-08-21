@@ -1,3 +1,4 @@
+import CoreData
 import Foundation
 
 protocol AddressRepositoryProtocol {
@@ -8,125 +9,102 @@ protocol AddressRepositoryProtocol {
     func address(id: String) async throws -> Address
 }
 
-final class DemoAddressRepository: AddressRepositoryProtocol {
+final class LocalAddressRepository: AddressRepositoryProtocol {
 
-    private let defaults: UserDefaults
-    private static let storageKey = "rvfood.addresses"
+    private let persistence: PersistenceController
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        if load().isEmpty {
-            let seed = [
-                Address(
-                    id: "addr_home",
-                    name: "Home",
-                    phone: "9876543210",
-                    houseDetail: "12A, Lotus Apartments",
-                    street: "Cross Cut Road",
-                    area: "Gandhipuram",
-                    city: "Coimbatore",
-                    state: "Tamil Nadu",
-                    postalCode: "641012",
-                    point: GeoPoint(latitude: 11.0185, longitude: 76.9674),
-                    type: .home,
-                    isDefault: true
-                ),
-                Address(
-                    id: "addr_work",
-                    name: "Work",
-                    phone: "9876543210",
-                    houseDetail: "Tidel Park, 4th Floor",
-                    street: "Avinashi Road",
-                    area: "Peelamedu",
-                    city: "Coimbatore",
-                    state: "Tamil Nadu",
-                    postalCode: "641004",
-                    point: GeoPoint(latitude: 11.0297, longitude: 77.0276),
-                    type: .work,
-                    isDefault: false
-                )
-            ]
-            persist(seed)
-        }
+    init(controller: PersistenceController = .shared) {
+        self.persistence = controller
     }
 
+    private var context: NSManagedObjectContext { persistence.context }
+
     func addresses() async throws -> [Address] {
-        try await Task.sleep(nanoseconds: 150_000_000)
-        return load().sorted { $0.isDefault && !$1.isDefault }
+        let request = NSFetchRequest<ManagedAddress>(entityName: "Address")
+        let results = try context.fetch(request)
+        return results
+            .map(\.asStruct)
+            .sorted { lhs, rhs in
+                if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
+                return lhs.name < rhs.name
+            }
     }
 
     func address(id: String) async throws -> Address {
-        guard let address = load().first(where: { $0.id == id }) else {
+        guard let managed = fetch(id: id) else {
             throw APIError.notFound
         }
-        return address
+        return managed.asStruct
     }
 
     func save(_ address: Address) async throws -> Address {
-        var all = load()
         var updated = address
-        if all.contains(where: { $0.id == updated.id }) {
-            all.removeAll { $0.id == updated.id }
+        if let existing = fetch(id: address.id) {
+            ManagedAddress.apply(address, to: existing)
         } else {
             updated = Address(
                 id: "addr_\(UUID().uuidString.prefix(8))",
-                name: updated.name,
-                phone: updated.phone,
-                houseDetail: updated.houseDetail,
-                street: updated.street,
-                area: updated.area,
-                city: updated.city,
-                state: updated.state,
-                postalCode: updated.postalCode,
-                point: updated.point,
-                type: updated.type,
-                isDefault: updated.isDefault
+                name: address.name,
+                phone: address.phone,
+                houseDetail: address.houseDetail,
+                street: address.street,
+                area: address.area,
+                city: address.city,
+                state: address.state,
+                postalCode: address.postalCode,
+                point: address.point,
+                type: address.type,
+                isDefault: address.isDefault
             )
+            ManagedAddress.from(updated, in: context)
         }
         if updated.isDefault {
-            all = all.map { item in
-                var item = item
-                item.isDefault = false
-                return item
-            }
+            clearDefaults(except: updated.id)
         }
-        all.append(updated)
-        persist(all)
+        persistence.save()
         return updated
     }
 
     func delete(addressId: String) async throws {
-        var all = load()
+        let all = try await addresses()
         guard all.count > 1 else {
             throw APIError.businessRule("Keep at least one saved address.")
         }
         let wasDefault = all.first(where: { $0.id == addressId })?.isDefault ?? false
-        all.removeAll { $0.id == addressId }
-        if wasDefault, var first = all.first {
-            first.isDefault = true
-            all[all.startIndex] = first
+        if let managed = fetch(id: addressId) {
+            context.delete(managed)
         }
-        persist(all)
+        if wasDefault, let first = try? await addresses().first(where: { $0.id != addressId }) {
+            setDefaultSync(first.id)
+        }
+        persistence.save()
     }
 
     func setDefault(addressId: String) async throws {
-        var all = load()
-        all = all.map { item in
-            var item = item
-            item.isDefault = (item.id == addressId)
-            return item
-        }
-        persist(all)
+        setDefaultSync(addressId)
+        persistence.save()
     }
 
-    private func load() -> [Address] {
-        guard let data = defaults.data(forKey: Self.storageKey) else { return [] }
-        return (try? JSONDecoder().decode([Address].self, from: data)) ?? []
+    private func setDefaultSync(_ addressId: String) {
+        let request = NSFetchRequest<ManagedAddress>(entityName: "Address")
+        let all = (try? context.fetch(request)) ?? []
+        for managed in all {
+            managed.isDefault = (managed.id == addressId)
+        }
     }
 
-    private func persist(_ addresses: [Address]) {
-        if let data = try? JSONEncoder().encode(addresses) {
-            defaults.set(data, forKey: Self.storageKey)
+    private func clearDefaults(except keepId: String) {
+        let request = NSFetchRequest<ManagedAddress>(entityName: "Address")
+        let all = (try? context.fetch(request)) ?? []
+        for managed in all where managed.id != keepId {
+            managed.isDefault = false
         }
+    }
+
+    private func fetch(id: String) -> ManagedAddress? {
+        let request = NSFetchRequest<ManagedAddress>(entityName: "Address")
+        request.predicate = NSPredicate(format: "id == %@", id)
+        request.fetchLimit = 1
+        return try? context.fetch(request).first
     }
 }
