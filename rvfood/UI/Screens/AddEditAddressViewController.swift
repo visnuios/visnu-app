@@ -171,6 +171,7 @@ final class AddEditAddressViewController: UIViewController {
                 saveButton.isEnabled = true
                 presentErrorAlert(error)
                 print(error)
+                print(error)
             }
         }
     }
